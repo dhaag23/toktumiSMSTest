@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hello">Hello World, SMSTest!</string>
+    <string name="app_name">toktumiSMSTest</string>
+    <string name="sms_warning">
+      WARNING: this demo can send actual text messages (one at a time), so be sure to
+      test with the Android emulator or have a text messaging plan with your carrier.
+    </string>
+    <string name="sms_enable_receiver">Enable SMS broadcast receiver</string>
+    <string name="sms_recipient_label">Recipient #</string>
+    <string name="sms_content_label">Message Body</string>
+    <string name="sms_send_message">Send</string>
+    <string name="sms_send_bulk_message">Send Bulk</string>
+    <string name="sms_speak_string_format">Message from "%1$s": %2$s</string>
+</resources>
