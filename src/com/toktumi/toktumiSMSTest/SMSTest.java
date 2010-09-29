@@ -1,7 +1,10 @@
 package com.toktumi.toktumiSMSTest;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,9 +20,11 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
+import android.os.Environment;
 import android.telephony.SmsManager;
 import android.text.TextUtils;
 import android.util.Log;
+import android.util.Pair;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
@@ -49,7 +54,11 @@ public class SMSTest extends Activity {
 	private TextView smsBulkStatusText; 
 	private SmsManager smsManager;
 	private Button sendBulkButton;
-	
+    private Pair<File, File> okAndErrorLogs;
+    private List<String> smsMessages;
+
+	private static final String SMS_INTENT_EXTRA = "com.toktumi.SMSTest.Phone"; 
+    
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -110,7 +119,8 @@ public class SMSTest extends Activity {
 
                 String recipient = recipientTextEdit.getText().toString();
                 for (String message : messages) {
-                	smsManager.sendTextMessage(recipient, null, message, PendingIntent.getBroadcast(SMSTest.this, 0, new Intent(ACTION_SMS_SENT), 0), null);
+                	Intent intent = new Intent(ACTION_SMS_SENT);
+                	smsManager.sendTextMessage(recipient, null, message, PendingIntent.getBroadcast(SMSTest.this, 0, intent, 0), null);
                 }
             }
         });
@@ -153,27 +163,36 @@ public class SMSTest extends Activity {
         registerReceiver(new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+            	synchronized (this) {
+                	handleBroadcast(intent);
+				}
+            }
+
+			private void handleBroadcast(Intent intent) {
+				String recipient = "error";
+				if (intent != null && !TextUtils.isEmpty(intent.getStringExtra(SMS_INTENT_EXTRA)) )
+					recipient = intent.getStringExtra(SMS_INTENT_EXTRA);
                 switch (getResultCode()) {
                 case Activity.RESULT_OK:
-                	Log.i(TAG, "OK: " + recipients.get(recipientIndex));
+                	Log.i(TAG, "OK: " + recipient);
+                	appendRecipient(okAndErrorLogs.first, recipient);
                     break;
                 case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
                 case SmsManager.RESULT_ERROR_NO_SERVICE:
                 case SmsManager.RESULT_ERROR_NULL_PDU:
                 case SmsManager.RESULT_ERROR_RADIO_OFF:
-                	Log.i(TAG, "Error: " + recipients.get(recipientIndex));
+                	Log.i(TAG, "Error: " + recipient);
+                	appendRecipient(okAndErrorLogs.second, recipient);
                     break;
                 default:
-                	Log.i(TAG, "Unknonw: " + recipients.get(recipientIndex));
+                	Log.i(TAG, "Unknown: " + recipient);
+                	appendRecipient(okAndErrorLogs.second, recipient);
                     break;
                 }
-            }
+			}
         }, new IntentFilter(ACTION_SMS_SENT));
         
-        
-        
-
-        
+       
         
         Button selectRecipientsFileButton = (Button) findViewById(R.id.sms_recipients_file_selection);
         selectRecipientsFileButton.setOnClickListener(new OnClickListener() {
@@ -218,8 +237,8 @@ public class SMSTest extends Activity {
                     return;
                 }
                 
-                final List<String> messages = smsManager.divideMessage(bulkContent);
-                sendMessagesAsync(messages, recipients);
+                smsMessages = smsManager.divideMessage(bulkContent);
+                sendMessagesAsync(smsMessages, recipients);
                 
                 sendBulkButton.setText("Cancel");
             }
@@ -228,22 +247,38 @@ public class SMSTest extends Activity {
         
     }
 
-
     
-    private void sendMessagesAsync(final List<String> messages, final ArrayList<String> recipients) {
+    private void sendMessagesAsync(final List<String> smsMessages, final ArrayList<String> recipients) {
     	sendingMessages = true;
         cancelSend = false;
         recipientIndex = 0;
     	
-        doSendMessageAsync(recipients.get(recipientIndex), messages);
+        try {
+			okAndErrorLogs = getLogFiles();
+		} catch (Exception e) {
+			Toast.makeText(this, "Yikes! Can't open logs.", Toast.LENGTH_LONG);
+		}
+
+        doSendMessageAsync(recipients.get(recipientIndex));
     }
 
-    
+    private void sendNextMessage() {
+    	synchronized (this) {
+        	recipientIndex++;
+        	if (!cancelSend && (recipientIndex < recipients.size()))
+        		doSendMessageAsync(recipients.get(recipientIndex));
+        	else {
+        		sendingMessages = false;
+        		smsBulkStatusText.setText("Done");
+                SMSTest.this.sendBulkButton.setText(R.string.sms_send_bulk_message);
+        	}
+		}
+    }
 
-	private void doSendMessageAsync(String recipient, final List<String> messages) {
+	private void doSendMessageAsync(String recipient) {
 		smsBulkStatusText.setText(String.format("Sending #%d to: %s", recipientIndex, recipient));
 		
-		SMSSendAsyncTask smsSendAsyncTask = new SMSSendAsyncTask(messages);
+		SMSSendAsyncTask smsSendAsyncTask = new SMSSendAsyncTask(smsMessages);
 		smsSendAsyncTask.execute(recipient);
 	}    
     
@@ -258,31 +293,28 @@ public class SMSTest extends Activity {
 
     	@Override
         protected Boolean doInBackground(String... recipient) {
-            for (String message : messages) {
-            	smsManager.sendTextMessage(recipient[0], null, message, PendingIntent.getBroadcast(SMSTest.this, 0, new Intent(ACTION_SMS_SENT), 0), null);
-                try {
-					Thread.sleep(2100);
-				} catch (InterruptedException e) {
-					return false;
-				}
-            }
+            try {
+    			Thread.sleep(2100);
+    		} catch (InterruptedException e) {
+    		}
+
+    		String theRecipient = recipient[0];
+        	Intent intent = new Intent(ACTION_SMS_SENT);
+        	intent.putExtra(SMS_INTENT_EXTRA, theRecipient);
+
+        	String message = messages.get(0);
+        	PendingIntent pendingIntent = PendingIntent.getBroadcast(SMSTest.this, 0, intent, PendingIntent.FLAG_ONE_SHOT);
+    		smsManager.sendTextMessage(theRecipient, null, message, pendingIntent, null);
             
             return !cancelSend;
-        }
+    	}
 
-        @Override
+    	@Override
         protected void onPostExecute(Boolean continueSend) {
-        	recipientIndex++;
-        	if (continueSend && (recipientIndex < recipients.size()))
-        		doSendMessageAsync(recipients.get(recipientIndex), messages);
-        	else {
-        		sendingMessages = false;
-        		smsBulkStatusText.setText("Done");
-                SMSTest.this.sendBulkButton.setText(R.string.sms_send_bulk_message);
-        	}
+			sendNextMessage();
         }
+    
     };
-
     
     
     @Override
@@ -326,6 +358,54 @@ public class SMSTest extends Activity {
     	catch (IOException ex) {
     		return "";
     	}
+    }
+
+
+    private void appendRecipient(File logfile, String recipient) {
+    	BufferedWriter writer = null;
+		try {
+			writer = new BufferedWriter(new FileWriter(logfile, true));
+	    	writer.append(recipient + ", ");
+		} catch (IOException e) {
+        	Log.e(TAG, "Error: " + e.toString());
+		}
+		finally {
+			if (writer != null) {
+				try {
+					writer.close();
+				} catch (IOException e) {
+				}
+			}
+		}
+    }
+
+    private Pair<File, File> getLogFiles() throws IOException {
+	    File sdRoot = Environment.getExternalStorageDirectory();
+
+	    String logPath = sdRoot.getPath() + "/smstestlogs"; 
+	    File logDir = new File(logPath);
+	    logDir.mkdir();
+	    
+	    File okFile = getAvailableFile(logPath, "sms_ok");
+//	    if (!okFile.canWrite())
+//	    	 throw new IllegalArgumentException("File cannot be written: " + okFile);
+
+	    File errorFile = getAvailableFile(logPath, "sms_error");
+//	    if (!errorFile.canWrite())
+//	    	 throw new IllegalArgumentException("File cannot be written: " + errorFile);
+	    
+	    return new Pair<File, File>(okFile, errorFile);
+    }
+
+    private File getAvailableFile(String dir, String base) {
+    	File availableFile;
+    	int index = 1;
+    	do {
+    		availableFile = new File(String.format("%s/%s-%d.txt", dir, base, index));
+    		index++;
+    	} while(availableFile.exists());
+    		
+   		return availableFile;
     }
 
 }
