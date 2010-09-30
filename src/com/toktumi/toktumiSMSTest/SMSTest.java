@@ -6,7 +6,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 
 import android.app.Activity;
@@ -24,16 +24,13 @@ import android.os.Environment;
 import android.telephony.SmsManager;
 import android.text.TextUtils;
 import android.util.Log;
-import android.util.Pair;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
 import android.widget.CheckBox;
-import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.CompoundButton.OnCheckedChangeListener;
 
 public class SMSTest extends Activity {
     /** Tag string for our debug logs */
@@ -46,19 +43,24 @@ public class SMSTest extends Activity {
 	private static final int PICK_CONTENT = 24;
     
 	private String bulkContent;
-	private ArrayList<String> recipients;
-	private int recipientIndex;
+	private LinkedList<Recipient> recipientList;
+	private int sendMessageIndex;
 
 	private boolean cancelSend;
 	private boolean sendingMessages;
 	private TextView smsBulkStatusText; 
 	private SmsManager smsManager;
 	private Button sendBulkButton;
-    private Pair<File, File> okAndErrorLogs;
+    private File okLog;
+    private File errorLog;
+    private File errorDetailsLog;
     private List<String> smsMessages;
+    private int sleepTime = 2100;
+    private long lastFailureTime = 0;
 
 	private static final String SMS_INTENT_EXTRA = "com.toktumi.SMSTest.Phone"; 
-    
+	
+   
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -77,21 +79,22 @@ public class SMSTest extends Activity {
         // Enable or disable the broadcast receiver depending on the checked
         // state of the checkbox.
         CheckBox enableCheckBox = (CheckBox) findViewById(R.id.sms_enable_receiver);
+        enableCheckBox.setChecked(true);
+        enableCheckBox.setEnabled(false);
 
         final PackageManager pm = this.getPackageManager();
         final ComponentName componentName = new ComponentName("com.toktumi.toktumiSMSTest", "com.toktumi.toktumiSMSTest.SMSTest");
+        pm.setComponentEnabledSetting(componentName, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP);
 
-        enableCheckBox.setChecked(pm.getComponentEnabledSetting(componentName) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
-
-        enableCheckBox.setOnCheckedChangeListener(new OnCheckedChangeListener() {
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                Log.d(TAG, (isChecked ? "Enabling" : "Disabling") + " SMS receiver");
-
-                pm.setComponentEnabledSetting(componentName,
-                        isChecked ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                        PackageManager.DONT_KILL_APP);
-            }
-        });
+//        enableCheckBox.setOnCheckedChangeListener(new OnCheckedChangeListener() {
+//            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+//                Log.d(TAG, (isChecked ? "Enabling" : "Disabling") + " SMS receiver");
+//
+//                pm.setComponentEnabledSetting(componentName,
+//                        isChecked ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+//                        PackageManager.DONT_KILL_APP);
+//            }
+//        });
 
         final EditText recipientTextEdit = (EditText) this.findViewById(R.id.sms_recipient);
         final EditText contentTextEdit = (EditText) this.findViewById(R.id.sms_content);
@@ -163,36 +166,11 @@ public class SMSTest extends Activity {
         registerReceiver(new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-            	synchronized (this) {
-                	handleBroadcast(intent);
+            	synchronized (SMSTest.this) {
+                	handleBroadcast(intent, getResultCode());
 				}
             }
-
-			private void handleBroadcast(Intent intent) {
-				String recipient = "error";
-				if (intent != null && !TextUtils.isEmpty(intent.getStringExtra(SMS_INTENT_EXTRA)) )
-					recipient = intent.getStringExtra(SMS_INTENT_EXTRA);
-                switch (getResultCode()) {
-                case Activity.RESULT_OK:
-                	Log.i(TAG, "OK: " + recipient);
-                	appendRecipient(okAndErrorLogs.first, recipient);
-                    break;
-                case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
-                case SmsManager.RESULT_ERROR_NO_SERVICE:
-                case SmsManager.RESULT_ERROR_NULL_PDU:
-                case SmsManager.RESULT_ERROR_RADIO_OFF:
-                	Log.i(TAG, "Error: " + recipient);
-                	appendRecipient(okAndErrorLogs.second, recipient);
-                    break;
-                default:
-                	Log.i(TAG, "Unknown: " + recipient);
-                	appendRecipient(okAndErrorLogs.second, recipient);
-                    break;
-                }
-			}
         }, new IntentFilter(ACTION_SMS_SENT));
-        
-       
         
         Button selectRecipientsFileButton = (Button) findViewById(R.id.sms_recipients_file_selection);
         selectRecipientsFileButton.setOnClickListener(new OnClickListener() {
@@ -227,7 +205,7 @@ public class SMSTest extends Activity {
                     return;
             	}
             	
-                if (recipients.size() <= 0) {
+                if (recipientList.size() <= 0) {
                     Toast.makeText(SMSTest.this, "Please enter a message recipient file.", Toast.LENGTH_SHORT).show();
                     return;
                 }
@@ -238,35 +216,89 @@ public class SMSTest extends Activity {
                 }
                 
                 smsMessages = smsManager.divideMessage(bulkContent);
-                sendMessagesAsync(smsMessages, recipients);
+                sendMessagesAsync(smsMessages, recipientList);
                 
                 sendBulkButton.setText("Cancel");
             }
         });
-        
-        
     }
 
+	private void handleBroadcast(Intent intent, int resultCode) {
+		String recipientNumber = "unknown";
+		Recipient recipient = null;
+		if (intent != null) {
+			recipient = (Recipient)intent.getSerializableExtra(SMS_INTENT_EXTRA);
+			recipientNumber = recipient.recipientNumber; 
+		}
+
+		if (resultCode == Activity.RESULT_OK) {
+        	Log.i(TAG, "OK: " + recipientNumber);
+        	appendRecipient(okLog, recipientNumber);
+        	
+        	if (((System.currentTimeMillis() - lastFailureTime) > 30000) && (sleepTime > 2100)) {
+            	sleepTime -= 10;
+            	Log.i(TAG, "Sleep time reduced to = " + sleepTime);
+        	}
+        	return;
+		}
+		
+		String errorType;
+		switch (resultCode) {
+            case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
+            	errorType = "RESULT_ERROR_GENERIC_FAILURE";
+            	break;
+            case SmsManager.RESULT_ERROR_NO_SERVICE:
+            	errorType = "RESULT_ERROR_NO_SERVICE";
+            	break;
+            case SmsManager.RESULT_ERROR_NULL_PDU:
+            	errorType = "RESULT_ERROR_NULL_PDU";
+            	break;
+            case SmsManager.RESULT_ERROR_RADIO_OFF:
+            	errorType = "RESULT_ERROR_RADIO_OFF";
+            	break;
+            default:
+            	errorType = "Unknown";
+            	break;
+        }
+        
+		String logtext = recipient + " error = " + errorType;
+        appendRecipient(errorDetailsLog, logtext);
+
+    	lastFailureTime = System.currentTimeMillis();
+        if ((recipient != null) && (recipient.trys < 3)) {
+        	recipient.trys++;
+    		Log.w(TAG, "Retry " + ((Integer)recipient.trys).toString() + ": " + recipientNumber);
+           	recipientList.addFirst(recipient);
+
+        	if (sleepTime < 10000) {
+        		sleepTime += 100;
+            	Log.i(TAG, "Sleep time increased to = " + sleepTime);
+        	}
+        }
+        else {
+       		Log.e(TAG, "Error: " + recipientNumber);
+        	appendRecipient(errorLog, recipientNumber);
+        }
+	}
     
-    private void sendMessagesAsync(final List<String> smsMessages, final ArrayList<String> recipients) {
+    private void sendMessagesAsync(final List<String> smsMessages, final LinkedList<Recipient> recipients) {
     	sendingMessages = true;
         cancelSend = false;
-        recipientIndex = 0;
+        sendMessageIndex = 0;
     	
         try {
-			okAndErrorLogs = getLogFiles();
+			setupLogFiles();
 		} catch (Exception e) {
 			Toast.makeText(this, "Yikes! Can't open logs.", Toast.LENGTH_LONG);
 		}
 
-        doSendMessageAsync(recipients.get(recipientIndex));
+        doSendMessageAsync(recipients.removeFirst());
     }
 
     private void sendNextMessage() {
-    	synchronized (this) {
-        	recipientIndex++;
-        	if (!cancelSend && (recipientIndex < recipients.size()))
-        		doSendMessageAsync(recipients.get(recipientIndex));
+    	synchronized (SMSTest.this) {
+        	if (!cancelSend && (recipientList.size() > 0))
+        		doSendMessageAsync(recipientList.removeFirst());
         	else {
         		sendingMessages = false;
         		smsBulkStatusText.setText("Done");
@@ -275,36 +307,49 @@ public class SMSTest extends Activity {
 		}
     }
 
-	private void doSendMessageAsync(String recipient) {
-		smsBulkStatusText.setText(String.format("Sending #%d to: %s", recipientIndex, recipient));
+	private void doSendMessageAsync(Recipient recipient) {
+		if (recipient.trys == 0) {
+	    	sendMessageIndex++;
+			recipient.sendMessageIndex = sendMessageIndex;  
+			smsBulkStatusText.setText(String.format("Sending #%d to: %s", recipient.sendMessageIndex, recipient.recipientNumber));
+		}
+		else
+			smsBulkStatusText.setText(String.format("Retry (%d) #%d to: %s", recipient.trys, recipient.sendMessageIndex, recipient.recipientNumber));
 		
 		SMSSendAsyncTask smsSendAsyncTask = new SMSSendAsyncTask(smsMessages);
 		smsSendAsyncTask.execute(recipient);
 	}    
     
     
-    private class SMSSendAsyncTask extends AsyncTask<String, Void, Boolean> {
-    	
+	private static int pendingIntentUniqueId = 0;
+    private class SMSSendAsyncTask extends AsyncTask<Recipient, Void, Boolean> {
     	private List<String> messages;
 
     	public SMSSendAsyncTask(final List<String> messages) {
     		this.messages = messages;
     	}
 
+    	private int getNextUniqueId() {
+    		synchronized (SMSTest.this) {
+    			pendingIntentUniqueId++;
+    			return pendingIntentUniqueId;
+    		}
+    	}
+
     	@Override
-        protected Boolean doInBackground(String... recipient) {
+        protected Boolean doInBackground(Recipient... recipient) {
             try {
-    			Thread.sleep(2100);
+    			Thread.sleep(sleepTime);
     		} catch (InterruptedException e) {
     		}
 
-    		String theRecipient = recipient[0];
+    		Recipient theRecipient = recipient[0];
         	Intent intent = new Intent(ACTION_SMS_SENT);
         	intent.putExtra(SMS_INTENT_EXTRA, theRecipient);
 
         	String message = messages.get(0);
-        	PendingIntent pendingIntent = PendingIntent.getBroadcast(SMSTest.this, 0, intent, PendingIntent.FLAG_ONE_SHOT);
-    		smsManager.sendTextMessage(theRecipient, null, message, pendingIntent, null);
+        	PendingIntent pendingIntent = PendingIntent.getBroadcast(SMSTest.this, getNextUniqueId(), intent, PendingIntent.FLAG_ONE_SHOT);
+    		smsManager.sendTextMessage(theRecipient.recipientNumber, null, message, pendingIntent, null);
             
             return !cancelSend;
     	}
@@ -323,13 +368,13 @@ public class SMSTest extends Activity {
             case PICK_RECIPIENTS:
             	Uri recipientsFileUri = data.getData();
             	String recipientFile = readFileAsString(recipientsFileUri.getPath());
-            	String[] recipientArray = recipientFile.split(",");
-            	recipients = new ArrayList<String>(recipientArray.length);
+            	String[] recipientNumberArray = recipientFile.split(",");
+            	recipientList = new LinkedList<Recipient>();
             	
-            	for (String recipient : recipientArray) {
-            		recipient = recipient.trim();
-            		if (!TextUtils.isEmpty(recipient))
-            			recipients.add(recipient);
+            	for (String recipientNumber : recipientNumberArray) {
+            		recipientNumber = recipientNumber.trim();
+            		if (!TextUtils.isEmpty(recipientNumber))
+            			recipientList.addLast(new Recipient(recipientNumber));
             	}
                 return;
             case PICK_CONTENT:
@@ -362,39 +407,35 @@ public class SMSTest extends Activity {
 
 
     private void appendRecipient(File logfile, String recipient) {
-    	BufferedWriter writer = null;
-		try {
-			writer = new BufferedWriter(new FileWriter(logfile, true));
-	    	writer.append(recipient + ", ");
-		} catch (IOException e) {
-        	Log.e(TAG, "Error: " + e.toString());
-		}
-		finally {
-			if (writer != null) {
-				try {
-					writer.close();
-				} catch (IOException e) {
+    	synchronized (SMSTest.this) {
+	    	BufferedWriter writer = null;
+			try {
+				writer = new BufferedWriter(new FileWriter(logfile, true));
+		    	writer.append(recipient + ", ");
+			} catch (IOException e) {
+	        	Log.e(TAG, "Error: " + e.toString());
+			}
+			finally {
+				if (writer != null) {
+					try {
+						writer.close();
+					} catch (IOException e) {
+					}
 				}
 			}
 		}
     }
 
-    private Pair<File, File> getLogFiles() throws IOException {
+    private void setupLogFiles() throws IOException {
 	    File sdRoot = Environment.getExternalStorageDirectory();
 
 	    String logPath = sdRoot.getPath() + "/smstestlogs"; 
 	    File logDir = new File(logPath);
 	    logDir.mkdir();
 	    
-	    File okFile = getAvailableFile(logPath, "sms_ok");
-//	    if (!okFile.canWrite())
-//	    	 throw new IllegalArgumentException("File cannot be written: " + okFile);
-
-	    File errorFile = getAvailableFile(logPath, "sms_error");
-//	    if (!errorFile.canWrite())
-//	    	 throw new IllegalArgumentException("File cannot be written: " + errorFile);
-	    
-	    return new Pair<File, File>(okFile, errorFile);
+	    okLog = getAvailableFile(logPath, "sms_ok");
+	    errorLog = getAvailableFile(logPath, "sms_error");
+	    errorDetailsLog = getAvailableFile(logPath, "sms_error_details");
     }
 
     private File getAvailableFile(String dir, String base) {
